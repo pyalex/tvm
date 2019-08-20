@@ -502,6 +502,10 @@ def _concat():
 def _pack():
     def _impl(inputs, attr, params):
         axis = int(attr["axis"])
+        input_shapes = [attr['_input_shapes'][i] for i in inputs]
+        if all(s == (1,) for s in input_shapes):
+            return _op.concatenate(inputs, axis)
+
         inputs_reshaped = [_op.expand_dims(i, axis=axis, num_newaxis=1) for i in inputs]
         return _op.concatenate(inputs_reshaped, axis)
     return _impl
@@ -806,7 +810,7 @@ def _stridedSlice():
         ellipsis_mask = int(attr.get('ellipsis_mask', 0))
         new_axis_mask = int(attr.get('new_axis_mask', 0))
         shrink_axis_mask = int(attr.get('shrink_axis_mask', 0))
-        data_shape = attr['_input_shapes'][inputs[0]]
+        data_shape = _infer_shape(inputs[0]) # attr['_input_shapes'][inputs[0]]
         data_dim = len(data_shape)
         stride_dim = len(stride)
 
@@ -873,9 +877,12 @@ def _stridedSlice():
 
         fshape_indices = None
         if begin_mask or end_mask or ellipsis_mask or new_axis_mask or shrink_axis_mask:
+            # ('before', begin, end, stride, _infer_shape(inputs[0]), begin_mask, end_mask)
             begin, end, stride, fshape_indices = _transform_mask(stride_dim, ellipsis_mask)
+            # print('after', begin, end, stride)
         out = _op.strided_slice(inputs[0], begin=begin, end=end, strides=stride)
         out_shape = _infer_shape(out)
+        # print('out shape', out_shape)
         if not fshape_indices:
             fshape_indices = range(len(out_shape))
 
@@ -891,6 +898,7 @@ def _stridedSlice():
 
         if not final_output:
             return out
+        # print('reshape', final_output)
         return _op.reshape(out, newshape=tuple(final_output))
     return _impl
 
@@ -930,6 +938,9 @@ def _transpose():
             axes = _get_list_param(params, inputs[1])
         except (IndexError, KeyError):
             axes = None
+        except AttributeError:
+            axes = _infer_value(inputs[1], params).asnumpy().tolist()
+
         return _op.transpose(inputs[0], axes=axes)
     return _impl
 
@@ -1103,7 +1114,18 @@ def _floordiv():
     def _impl(inputs, attr, params):
         assert len(inputs) == 2
         div = AttrCvt('divide')(inputs, attr)
-        return get_relay_op('floor')(div)
+        return get_relay_op('floor')(div.astype('float'))
+    return _impl
+
+def _floormod():
+    def _impl(inputs, attr, params):
+        x, y = inputs
+        x, y = x.astype('float32'), y.astype('float32')
+        div = AttrCvt('divide')((x, y), attr)
+        fdiv = get_relay_op('floor')(div)
+        out = x - fdiv * y
+        # print (_infer_shape(x), _infer_shape(out))
+        return out.astype(attr['T'].name)
     return _impl
 
 def _logical(name):
@@ -1116,7 +1138,11 @@ def _space_to_batch_nd():
         input_node = inputs[0]
         input_shape = attr['_input_shapes'][input_node]
         block_shape = _get_list_param(params, inputs[1])
-        paddings = _get_list_param(params, inputs[2])
+        try:
+            paddings = _get_list_param(params, inputs[2])
+        except AttributeError:
+            paddings = _infer_value(inputs[2], params).asnumpy().tolist()
+
         N = len(input_shape)
         M = len(block_shape)
         batch = input_shape[0]
@@ -1155,14 +1181,18 @@ def _batch_to_space_nd():
         input_node = inputs[0]
         input_shape = attr['_input_shapes'][input_node]
         block_shape = _get_list_param(params, inputs[1])
-        crops = _get_list_param(params, inputs[2])
+        try:
+            crops = _get_list_param(params, inputs[2])
+        except AttributeError:
+            crops = _infer_value(inputs[2], params).asnumpy().tolist()
+
         M = len(block_shape)
         batch = input_shape[0]
         # From https://www.tensorflow.org/api_docs/cc/class/tensorflow/ops/batch-to-space-n-d:
         # Reshape input to reshaped of shape:
         # [block_shape[0], ..., block_shape[M-1], batch / prod(block_shape),
         #  input_shape[1], ..., input_shape[N-1]]
-        shape1 = block_shape + [batch // np.prod(block_shape)] + input_shape[1:]
+        shape1 = block_shape + [batch // np.prod(block_shape)] + list(input_shape[1:])
         reshaped = tvm.relay.reshape(input_node, newshape=shape1)
         # Permute dimensions of reshaped to produce permuted of shape
         # [batch / prod(block_shape), input_shape[1], block_shape[0], ...,
@@ -1251,6 +1281,7 @@ _convert_map = {
     'Fill'                              : _fill(),
     'Floor'                             : AttrCvt('floor'),
     'FloorDiv'                          : _floordiv(),
+    'FloorMod'                          : _floormod(),
     'FusedBatchNorm'                    : _fused_batch_norm(),
     'FusedBatchNormV2'                  : _fused_batch_norm(),
     'Gather'                            : _gather(),
@@ -1880,7 +1911,7 @@ class GraphProto(object):
 
         if missing_operators:
             raise NotImplementedError( \
-                "The following operators are not implemented: {}".format(missing_operators))
+               "The following operators are not implemented: {}".format(missing_operators))
 
         control_flow_node_map = defaultdict(set)
         for node in graph.node:
@@ -1987,7 +2018,16 @@ class GraphProto(object):
                                                              attr,
                                                              control_flow_node_map)
                 else:
+                    #try:
+                    #print('converting node', node.name)
                     op = self._convert_operator(node.op, inputs, attr, graph)
+                    # if isinstance(op, np.ndarray):
+                    #     print(node.name, op.shape)
+                    # else:
+                    #     print(node.name, _infer_shape(op),
+                    #           [_infer_shape(i) for i in inputs])
+                    #except NotImplementedError:
+                    #    continue
 
                 # Check if op is converted to param
                 if isinstance(op, np.ndarray):
@@ -1999,6 +2039,9 @@ class GraphProto(object):
                 elif isinstance(op, (_expr.TupleWrapper, tuple, list)):
                     pass
                 elif isinstance(op, _expr.Expr):
+
+                    #vars = analysis.free_vars(op)
+                    #_infer_value(op, {v.name_hint: np.zeros([int(d) for d in v.type_annotation.shape]) for v in vars})
                     op = [op]
                 else:
                     raise RuntimeError("unexpected type %s" % type(op))

@@ -353,6 +353,10 @@ class AttrCvt(object):
         self._ignores.append('is_training')
         self._ignores.append('_target_layout')
 
+        self._ignores.append('explicit_paddings')
+        self._ignores.append('batch_dims')
+        self._ignores.append('half_pixel_centers')
+
         # apply custom check
         if self._custom_check:
             func, msg = self._custom_check
@@ -378,7 +382,8 @@ class AttrCvt(object):
                 logging.warning("Attribute %s is disabled in relay.sym.%s", k, op_name)
             elif k in self._ignores:
                 if k != 'tvm_custom':
-                    logging.warning("Attribute %s is ignored in relay.sym.%s", k, op_name)
+                    pass
+                    #logging.warning("Attribute %s is ignored in relay.sym.%s", k, op_name)
             elif k in self._transforms:
                 new_name, defaults, transform = self._parse_default(self._transforms[k])
                 if defaults is None:
