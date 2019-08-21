@@ -84,6 +84,9 @@ def _dimension_constraint():
     return _dim_check, "Only 2d kernel supported."
 
 def _get_param(params, input_node):
+    if not hasattr(input_node, 'name_hint'):
+        return _infer_value(input_node, params).asnumpy()
+
     return params.pop(input_node.name_hint).asnumpy()
 
 def _get_num_param(params, input_node):
@@ -117,6 +120,14 @@ def _argx(func, func_name):
 def _elemwise(name):
     def _impl(inputs, attr, params):
         assert len(inputs) == 2, "{} take 2 inputs, {} given".format(name, len(inputs))
+
+        inputs = [i for i in inputs if all(d != 0 for d in _infer_shape(i))]
+        if len(inputs) == 1:
+            return inputs[0]
+
+        if not inputs:
+            return np.array([], dtype=attr['T'].as_numpy_dtype).reshape(attr['_output_shapes'][0])
+
         return get_relay_op(name)(*inputs)
     return _impl
 
@@ -206,6 +217,9 @@ def _conv(opname):
 
         input_shape = attr['_input_shapes'][inputs[0]]
         weights_shape = attr['_input_shapes'][inputs[1]]
+
+        if not input_shape[0]:
+            return np.array([], dtype=attr['T'].as_numpy_dtype).reshape(attr['_output_shapes'][0])
 
         if attr['_target_layout'] == "NCHW" and attr['data_format'] == "NHWC":
             input_shape = [input_shape[ii] for ii in (0, 3, 1, 2)]
@@ -529,11 +543,16 @@ def _slice():
         data_shape = attr['_input_shapes'][inputs[0]]
         data_dim = len(data_shape)
         end = size
+
         for i in range(data_dim):
             if size[i] == -1:
                 end[i] = data_shape[i] - begin[i]
             else:
                 end[i] += begin[i]
+
+        if any(e - b == 0 for b, e in zip(begin, end)):
+            return np.array([], dtype=attr['T'].as_numpy_dtype).reshape([e - b for b, e in zip(begin, end)])
+
         return _op.strided_slice(inputs[0], begin=begin, end=end)
     return _impl
 
@@ -1114,7 +1133,7 @@ def _floordiv():
     def _impl(inputs, attr, params):
         assert len(inputs) == 2
         div = AttrCvt('divide')(inputs, attr)
-        return get_relay_op('floor')(div.astype('float'))
+        return get_relay_op('floor')(div.astype('float')).astype(attr['T'].name)
     return _impl
 
 def _floormod():
@@ -1138,10 +1157,10 @@ def _space_to_batch_nd():
         input_node = inputs[0]
         input_shape = attr['_input_shapes'][input_node]
         block_shape = _get_list_param(params, inputs[1])
-        try:
-            paddings = _get_list_param(params, inputs[2])
-        except AttributeError:
-            paddings = _infer_value(inputs[2], params).asnumpy().tolist()
+        paddings = _get_list_param(params, inputs[2])
+
+        if not input_shape[0]:
+            return np.array([], dtype=attr['T'].as_numpy_dtype).reshape(attr['_output_shapes'][0])
 
         N = len(input_shape)
         M = len(block_shape)
@@ -1181,10 +1200,10 @@ def _batch_to_space_nd():
         input_node = inputs[0]
         input_shape = attr['_input_shapes'][input_node]
         block_shape = _get_list_param(params, inputs[1])
-        try:
-            crops = _get_list_param(params, inputs[2])
-        except AttributeError:
-            crops = _infer_value(inputs[2], params).asnumpy().tolist()
+        crops = _get_list_param(params, inputs[2])
+
+        if not input_shape[0]:
+            return np.array([], dtype=attr['T'].as_numpy_dtype).reshape(attr['_output_shapes'][0])
 
         M = len(block_shape)
         batch = input_shape[0]
@@ -2023,7 +2042,7 @@ class GraphProto(object):
                     op = self._convert_operator(node.op, inputs, attr, graph)
                     # if isinstance(op, np.ndarray):
                     #     print(node.name, op.shape)
-                    # else:
+                    # elif not isinstance(op, _expr.TupleWrapper):
                     #     print(node.name, _infer_shape(op),
                     #           [_infer_shape(i) for i in inputs])
                     #except NotImplementedError:
