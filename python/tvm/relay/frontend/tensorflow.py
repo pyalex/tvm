@@ -152,10 +152,10 @@ def _pooling(name):
 
         if attr['_target_layout'] == "NCHW" and attr['data_format'] == "NHWC":
             tmp_shape = attr['_input_shapes'][inputs[0]]
-            input_shape = [tmp_shape[ii] for ii in (0, 3, 1, 2)]
-            inputs[0] = _op.transpose(inputs[0], axes=(0, 3, 1, 2))
+            # input_shape = [tmp_shape[ii] for ii in (0, 3, 1, 2)]
+            # inputs[0] = _op.transpose(inputs[0], axes=(0, 3, 1, 2))
             attr['data_format'] = "NCHW"
-            flip_layout = True
+            # flip_layout = True
 
         # Fix padding
         attr['padding'] = attr['padding'].decode("utf-8")
@@ -222,8 +222,8 @@ def _conv(opname):
             return np.array([], dtype=attr['T'].as_numpy_dtype).reshape(attr['_output_shapes'][0])
 
         if attr['_target_layout'] == "NCHW" and attr['data_format'] == "NHWC":
-            input_shape = [input_shape[ii] for ii in (0, 3, 1, 2)]
-            inputs[0] = _op.transpose(inputs[0], axes=(0, 3, 1, 2))
+            # input_shape = [input_shape[ii] for ii in (0, 3, 1, 2)]
+            # inputs[0] = _op.transpose(inputs[0], axes=(0, 3, 1, 2))
             if opname == 'conv':
                 weights_shape = [weights_shape[ii] for ii in (3, 2, 0, 1)]
                 inputs[1] = _op.transpose(inputs[1], axes=(3, 2, 0, 1))
@@ -233,7 +233,7 @@ def _conv(opname):
 
             attr['data_format'] = "NCHW"
             attr['strides'] = [attr['strides'][ii] for ii in (0, 3, 1, 2)]
-            flip_layout = True
+            # flip_layout = True
 
         if attr['data_format'] == 'NHWC':
             kernel_h, kernel_w, _, depth_mult = weights_shape
@@ -433,7 +433,7 @@ def _resize_nearest_neighbor():
         attr['size'] = size
         inputs.pop(1)
         # NHWC
-        attr['layout'] = 'NHWC'
+        attr['layout'] = attr['_target_layout']
 
         return AttrCvt(op_name="resize",
                        ignores=['Tdim'],
@@ -653,7 +653,7 @@ def _space_to_depth():
 def _bias_add():
     def _impl(inputs, attr, params):
         # Must expand for proper broadcasting in NCHW.
-        if attr['data_format'].decode("utf-8") == 'NCHW':
+        if attr['data_format'].decode("utf-8") == 'NCHW' or attr['_target_layout'] == 'NCHW':
             bias = _op.reshape(inputs[1], newshape=(1, -1, 1, 1))
         else:
             bias = inputs[1]
@@ -689,7 +689,7 @@ def _fused_batch_norm():
 
         if 'data_format' in attr:
             attr['data_format'] = attr['data_format'].decode("utf-8")
-            if attr['data_format'] == 'NCHW':
+            if attr['data_format'] == 'NCHW' or attr['_target_layout'] == 'NCHW':
                 axis = 1
         if 'U' in attr:
             need_cast = True
@@ -2038,13 +2038,13 @@ class GraphProto(object):
                                                              control_flow_node_map)
                 else:
                     #try:
-                    #print('converting node', node.name)
+                    print('converting node', node.name)
                     op = self._convert_operator(node.op, inputs, attr, graph)
-                    # if isinstance(op, np.ndarray):
-                    #     print(node.name, op.shape)
-                    # elif not isinstance(op, _expr.TupleWrapper):
-                    #     print(node.name, _infer_shape(op),
-                    #           [_infer_shape(i) for i in inputs])
+                    if isinstance(op, np.ndarray):
+                        print(node.name, op.shape)
+                    elif not isinstance(op, _expr.TupleWrapper):
+                        print(node.name, _infer_shape(op),
+                              [_infer_shape(i) for i in inputs])
                     #except NotImplementedError:
                     #    continue
 
@@ -2317,13 +2317,16 @@ class GraphProto(object):
             self._loops[node_name_prefix].cond = op[0]
         elif node.op == "Switch":
             op = self._nodes[node.input[0]]
+            cond_op = self._nodes[node.input[1]]
+            #_infer_value(cond_op[0], self._params)
             assert len(op) == 1
             if _in_while_loop(control_flow_node_map, node_name_prefix):
                 self._loops[node_name_prefix].loop_vars.append(op[0])
             else:
                 if node_name_prefix not in self._branches:
                     self._branches[node_name_prefix] = Branch()
-                chk_op = _infer_type(op[0])
+                #self._branches[node.name] = Branch()
+                chk_op = _infer_type(cond_op[0])
                 self._branches[node_name_prefix].cond = chk_op
         elif node.op == "NextIteration":
             op = self._nodes[node.input[0]]
